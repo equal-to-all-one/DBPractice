@@ -55,20 +55,24 @@ std::shared_ptr<Query> Analyze::do_analyze(std::shared_ptr<ast::TreeNode> parse)
         if (!sm_manager_->db_.is_table(x->tab_name)) {
             throw TableNotFoundError(x->tab_name);
         }
-        TabMeta &tab = sm_manager_->db_.get_table(x->tab_name);
-        for (auto &sv_set : x->set_clauses) {
-            SetClause set_clause;
-            set_clause.lhs = {.tab_name = x->tab_name, .col_name = sv_set->col_name};
-            set_clause.rhs = convert_sv_value(sv_set->val);
-            auto col = tab.get_col(sv_set->col_name);
-            if (set_clause.rhs.type != col->type) {
-                throw IncompatibleTypeError(coltype2str(col->type), coltype2str(set_clause.rhs.type));
+        std::vector<ColMeta> all_cols;
+        get_all_cols({x->tab_name}, all_cols);
+        for (auto &sv_set_clause : x->set_clauses) {
+            TabCol lhs = {.tab_name = x->tab_name, .col_name = sv_set_clause->col_name};
+            lhs = check_column(all_cols, lhs);
+            TabMeta &tab = sm_manager_->db_.get_table(lhs.tab_name);
+            auto col = tab.get_col(lhs.col_name);
+            Value rhs = convert_sv_value(sv_set_clause->val);
+            coerce_value_to_col_type(rhs, col->type);
+            if (rhs.type != col->type) {
+                throw IncompatibleTypeError(coltype2str(col->type), coltype2str(rhs.type));
             }
-            set_clause.rhs.init_raw(col->len);
-            query->set_clauses.push_back(set_clause);
+            rhs.init_raw(col->len);
+            query->set_clauses.push_back(SetClause{lhs, rhs});
         }
         get_clause(x->conds, query->conds);
         check_clause({x->tab_name}, query->conds);
+
     } else if (auto x = std::dynamic_pointer_cast<ast::DeleteStmt>(parse)) {
         if (!sm_manager_->db_.is_table(x->tab_name)) {
             throw TableNotFoundError(x->tab_name);
@@ -164,11 +168,8 @@ void Analyze::check_clause(const std::vector<std::string> &tab_names, std::vecto
         ColType lhs_type = lhs_col->type;
         ColType rhs_type;
         if (cond.is_rhs_val) {
-            if (lhs_type == TYPE_FLOAT && cond.rhs_val.type == TYPE_INT) {
-                cond.rhs_val.set_float(static_cast<float>(cond.rhs_val.int_val));
-            } else if (lhs_type == TYPE_INT && cond.rhs_val.type == TYPE_FLOAT) {
-                cond.rhs_val.set_int(static_cast<int>(cond.rhs_val.float_val));
-            } else if (lhs_type != cond.rhs_val.type) {
+            coerce_value_to_col_type(cond.rhs_val, lhs_type);
+            if (lhs_type != cond.rhs_val.type) {
                 throw IncompatibleTypeError(coltype2str(lhs_type), coltype2str(cond.rhs_val.type));
             }
             cond.rhs_val.init_raw(lhs_col->len);
@@ -197,6 +198,16 @@ Value Analyze::convert_sv_value(const std::shared_ptr<ast::Value> &sv_val) {
         throw InternalError("Unexpected sv value type");
     }
     return val;
+}
+
+void Analyze::coerce_value_to_col_type(Value &val, ColType col_type) {
+    if (val.type == col_type) {
+        return;
+    }
+    if (col_type == TYPE_FLOAT && val.type == TYPE_INT) {
+        int int_val = val.int_val;
+        val.set_float(static_cast<float>(int_val));
+    }
 }
 
 CompOp Analyze::convert_sv_comp_op(ast::SvCompOp op) {
