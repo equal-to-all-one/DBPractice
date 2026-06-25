@@ -285,23 +285,47 @@ std::shared_ptr<Plan> Planner::make_one_rel(std::shared_ptr<Query> query)
 std::shared_ptr<Plan> Planner::generate_sort_plan(std::shared_ptr<Query> query, std::shared_ptr<Plan> plan)
 {
     auto x = std::dynamic_pointer_cast<ast::SelectStmt>(query->parse);
-    if(!x->has_sort) {
+    if (x->orders.empty()) {
         return plan;
     }
-    std::vector<std::string> tables = query->tables;
     std::vector<ColMeta> all_cols;
-    for (auto &sel_tab_name : tables) {
-        // 这里db_不能写成get_db(), 注意要传指针
+    for (auto &sel_tab_name : query->tables) {
         const auto &sel_tab_cols = sm_manager_->db_.get_table(sel_tab_name).cols;
         all_cols.insert(all_cols.end(), sel_tab_cols.begin(), sel_tab_cols.end());
     }
-    TabCol sel_col;
-    for (auto &col : all_cols) {
-        if(col.name.compare(x->order->cols->col_name) == 0 )
-        sel_col = {.tab_name = col.tab_name, .col_name = col.name};
+
+    std::vector<TabCol> sort_cols;
+    std::vector<bool> is_desc;
+    for (auto &order : x->orders) {
+        TabCol sel_col = {.tab_name = order->cols->tab_name, .col_name = order->cols->col_name};
+        if (sel_col.tab_name.empty()) {
+            for (auto &col : all_cols) {
+                if (col.name == sel_col.col_name) {
+                    if (!sel_col.tab_name.empty()) {
+                        throw AmbiguousColumnError(sel_col.col_name);
+                    }
+                    sel_col.tab_name = col.tab_name;
+                }
+            }
+            if (sel_col.tab_name.empty()) {
+                throw ColumnNotFoundError(sel_col.col_name);
+            }
+        } else {
+            bool found = false;
+            for (auto &col : all_cols) {
+                if (col.tab_name == sel_col.tab_name && col.name == sel_col.col_name) {
+                    found = true;
+                    break;
+                }
+            }
+            if (!found) {
+                throw ColumnNotFoundError(sel_col.col_name);
+            }
+        }
+        sort_cols.push_back(sel_col);
+        is_desc.push_back(order->orderby_dir == ast::OrderBy_DESC);
     }
-    return std::make_shared<SortPlan>(T_Sort, std::move(plan), sel_col, 
-                                    x->order->orderby_dir == ast::OrderBy_DESC);
+    return std::make_shared<SortPlan>(T_Sort, std::move(plan), sort_cols, is_desc, x->limit);
 }
 
 

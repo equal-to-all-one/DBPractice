@@ -92,6 +92,7 @@ single_op ";"|"("|")"|","|"*"|"="|">"|"<"|"."
 "MAX" { return MAX; }
 "MIN" { return MIN; }
 "AS" { return AS; }
+"LIMIT" { return LIMIT; }
     /* operators */
 ">=" { return GEQ; }
 "<=" { return LEQ; }

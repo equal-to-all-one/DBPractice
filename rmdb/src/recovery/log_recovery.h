@@ -11,21 +11,18 @@ See the Mulan PSL v2 for more details. */
 #pragma once
 
 #include <map>
-#include <unordered_map>
+#include <memory>
+#include <string>
+#include <unordered_set>
+#include <vector>
+
 #include "log_manager.h"
 #include "storage/disk_manager.h"
 #include "system/sm_manager.h"
 
-class RedoLogsInPage {
-public:
-    RedoLogsInPage() { table_file_ = nullptr; }
-    RmFileHandle* table_file_;
-    std::vector<lsn_t> redo_logs_;   // 在该page上需要redo的操作的lsn
-};
-
 class RecoveryManager {
-public:
-    RecoveryManager(DiskManager* disk_manager, BufferPoolManager* buffer_pool_manager, SmManager* sm_manager) {
+   public:
+    RecoveryManager(DiskManager *disk_manager, BufferPoolManager *buffer_pool_manager, SmManager *sm_manager) {
         disk_manager_ = disk_manager;
         buffer_pool_manager_ = buffer_pool_manager;
         sm_manager_ = sm_manager;
@@ -34,9 +31,24 @@ public:
     void analyze();
     void redo();
     void undo();
-private:
-    LogBuffer buffer_;                                              // 读入日志
-    DiskManager* disk_manager_;                                     // 用来读写文件
-    BufferPoolManager* buffer_pool_manager_;                        // 对页面进行读写
-    SmManager* sm_manager_;                                         // 访问数据库元数据
+
+    lsn_t get_next_lsn() const { return static_cast<lsn_t>(logs_.size()); }
+
+    txn_id_t get_next_txn_id() const {
+        return max_txn_id_ == INVALID_TXN_ID ? 0 : max_txn_id_ + 1;
+    }
+
+   private:
+    std::map<txn_id_t, lsn_t> att_;
+    std::unordered_set<txn_id_t> aborted_txns_;
+    std::unordered_set<std::string> tables_with_dml_;
+    std::vector<std::shared_ptr<LogRecord>> logs_;
+    txn_id_t max_txn_id_ = INVALID_TXN_ID;
+    LogBuffer buffer_;
+    DiskManager *disk_manager_;
+    BufferPoolManager *buffer_pool_manager_;
+    SmManager *sm_manager_;
+
+    void rollback(bool redo_phase);
+    void rebuild_indexes_from_table();
 };

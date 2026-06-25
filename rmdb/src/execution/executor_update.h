@@ -14,6 +14,7 @@ See the Mulan PSL v2 for more details. */
 #include "executor_abstract.h"
 #include "executor_utils.h"
 #include "index/ix.h"
+#include "recovery/log_manager.h"
 #include "system/sm.h"
 
 class UpdateExecutor : public AbstractExecutor {
@@ -26,6 +27,30 @@ class UpdateExecutor : public AbstractExecutor {
     std::vector<SetClause> set_clauses_;
     SmManager *sm_manager_;
     size_t idx_;
+
+    void delete_index_entry(const RmRecord *rec, const Rid &rid, const IndexMeta &index) {
+        auto ix_name = sm_manager_->get_ix_manager()->get_index_name(tab_name_, index.cols);
+        auto ih = sm_manager_->ihs_.at(ix_name).get();
+        auto key = build_index_key(index, rec->data);
+        auto *index_log =
+            new IndexDeleteLogRecord(context_->txn_->get_transaction_id(), key.get(), rid, ix_name, index.col_tot_len);
+        index_log->prev_lsn_ = context_->txn_->get_prev_lsn();
+        context_->log_mgr_->add_log_to_buffer(index_log);
+        context_->txn_->set_prev_lsn(index_log->lsn_);
+        ih->delete_entry(key.get(), context_->txn_);
+    }
+
+    void insert_index_entry(const RmRecord *rec, const Rid &rid, const IndexMeta &index) {
+        auto ix_name = sm_manager_->get_ix_manager()->get_index_name(tab_name_, index.cols);
+        auto ih = sm_manager_->ihs_.at(ix_name).get();
+        auto key = build_index_key(index, rec->data);
+        auto *index_log =
+            new IndexInsertLogRecord(context_->txn_->get_transaction_id(), key.get(), rid, ix_name, index.col_tot_len);
+        index_log->prev_lsn_ = context_->txn_->get_prev_lsn();
+        context_->log_mgr_->add_log_to_buffer(index_log);
+        context_->txn_->set_prev_lsn(index_log->lsn_);
+        ih->insert_entry(key.get(), rid, context_->txn_);
+    }
 
    public:
     UpdateExecutor(SmManager *sm_manager, const std::string &tab_name, std::vector<SetClause> set_clauses,
@@ -61,11 +86,7 @@ class UpdateExecutor : public AbstractExecutor {
 
         for (size_t rec_i = 0; rec_i < rids_.size(); rec_i++) {
             for (auto &index : tab_.indexes) {
-                auto old_key = build_index_key(index, old_records[rec_i]->data);
                 auto new_key = build_index_key(index, new_records[rec_i]->data);
-                if (memcmp(old_key.get(), new_key.get(), index.col_tot_len) == 0) {
-                    continue;
-                }
                 auto ih = sm_manager_->ihs_.at(sm_manager_->get_ix_manager()->get_index_name(tab_name_, index.cols)).get();
                 std::vector<Rid> result;
                 if (ih->get_value(new_key.get(), &result, context_->txn_)) {
@@ -87,27 +108,24 @@ class UpdateExecutor : public AbstractExecutor {
         }
 
         for (size_t rec_i = 0; rec_i < rids_.size(); rec_i++) {
-            std::vector<std::unique_ptr<char[]>> old_keys;
-            std::vector<std::unique_ptr<char[]>> new_keys;
             for (auto &index : tab_.indexes) {
-                old_keys.push_back(build_index_key(index, old_records[rec_i]->data));
-                new_keys.push_back(build_index_key(index, new_records[rec_i]->data));
+                delete_index_entry(old_records[rec_i].get(), rids_[rec_i], index);
             }
-            for (size_t idx_i = 0; idx_i < tab_.indexes.size(); idx_i++) {
-                auto &index = tab_.indexes[idx_i];
-                auto ih = sm_manager_->ihs_.at(sm_manager_->get_ix_manager()->get_index_name(tab_name_, index.cols)).get();
-                if (memcmp(old_keys[idx_i].get(), new_keys[idx_i].get(), index.col_tot_len) != 0) {
-                    ih->delete_entry(old_keys[idx_i].get(), context_->txn_);
-                }
+            for (auto &index : tab_.indexes) {
+                insert_index_entry(new_records[rec_i].get(), rids_[rec_i], index);
+            }
+
+            auto *log_record = new UpdateLogRecord(context_->txn_->get_transaction_id(), *old_records[rec_i],
+                                                   rids_[rec_i], tab_name_, *new_records[rec_i]);
+            log_record->prev_lsn_ = context_->txn_->get_prev_lsn();
+            context_->log_mgr_->add_log_to_buffer(log_record);
+            context_->txn_->set_prev_lsn(log_record->lsn_);
+
+            if (context_->txn_ != nullptr) {
+                context_->txn_->append_write_record(
+                    new WriteRecord(WType::UPDATE_TUPLE, tab_name_, rids_[rec_i], *old_records[rec_i]));
             }
             fh_->update_record(rids_[rec_i], new_records[rec_i]->data, context_);
-            for (size_t idx_i = 0; idx_i < tab_.indexes.size(); idx_i++) {
-                auto &index = tab_.indexes[idx_i];
-                auto ih = sm_manager_->ihs_.at(sm_manager_->get_ix_manager()->get_index_name(tab_name_, index.cols)).get();
-                if (memcmp(old_keys[idx_i].get(), new_keys[idx_i].get(), index.col_tot_len) != 0) {
-                    ih->insert_entry(new_keys[idx_i].get(), rids_[rec_i], context_->txn_);
-                }
-            }
         }
         return nullptr;
     }

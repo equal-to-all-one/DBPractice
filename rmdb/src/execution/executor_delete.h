@@ -14,6 +14,7 @@ See the Mulan PSL v2 for more details. */
 #include "executor_abstract.h"
 #include "executor_utils.h"
 #include "index/ix.h"
+#include "recovery/log_manager.h"
 #include "system/sm.h"
 
 class DeleteExecutor : public AbstractExecutor {
@@ -25,6 +26,20 @@ class DeleteExecutor : public AbstractExecutor {
     std::string tab_name_;
     SmManager *sm_manager_;
     size_t idx_;
+
+    void delete_index(const RmRecord *rec, const Rid &rid) {
+        for (auto &index : tab_.indexes) {
+            auto ix_name = sm_manager_->get_ix_manager()->get_index_name(tab_name_, index.cols);
+            auto ih = sm_manager_->ihs_.at(ix_name).get();
+            auto key = build_index_key(index, rec->data);
+            auto *index_log = new IndexDeleteLogRecord(context_->txn_->get_transaction_id(), key.get(), rid, ix_name,
+                                                       index.col_tot_len);
+            index_log->prev_lsn_ = context_->txn_->get_prev_lsn();
+            context_->log_mgr_->add_log_to_buffer(index_log);
+            context_->txn_->set_prev_lsn(index_log->lsn_);
+            ih->delete_entry(key.get(), context_->txn_);
+        }
+    }
 
    public:
     DeleteExecutor(SmManager *sm_manager, const std::string &tab_name, std::vector<Condition> conds,
@@ -43,12 +58,17 @@ class DeleteExecutor : public AbstractExecutor {
         while (idx_ < rids_.size()) {
             Rid rid = rids_[idx_++];
             auto rec = fh_->get_record(rid, context_);
-            for (auto &index : tab_.indexes) {
-                auto key = build_index_key(index, rec->data);
-                auto ih = sm_manager_->ihs_.at(sm_manager_->get_ix_manager()->get_index_name(tab_name_, index.cols)).get();
-                ih->delete_entry(key.get(), context_->txn_);
-            }
+
+            auto *log_record = new DeleteLogRecord(context_->txn_->get_transaction_id(), *rec, rid, tab_name_);
+            log_record->prev_lsn_ = context_->txn_->get_prev_lsn();
+            context_->log_mgr_->add_log_to_buffer(log_record);
+            context_->txn_->set_prev_lsn(log_record->lsn_);
+
+            delete_index(rec.get(), rid);
             fh_->delete_record(rid, context_);
+            if (context_->txn_ != nullptr) {
+                context_->txn_->append_write_record(new WriteRecord(WType::DELETE_TUPLE, tab_name_, rid, *rec));
+            }
         }
         return nullptr;
     }

@@ -70,6 +70,9 @@ class SeqScanExecutor : public AbstractExecutor {
     bool is_end() const override { return is_end_; }
 
     void beginTuple() override {
+        if (context_ != nullptr && context_->txn_ != nullptr && context_->lock_mgr_ != nullptr) {
+            context_->lock_mgr_->lock_shared_on_table(context_->txn_, fh_->GetFd());
+        }
         scan_ = std::make_unique<RmScan>(fh_);
         find_next();
     }

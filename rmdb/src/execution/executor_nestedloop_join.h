@@ -9,60 +9,89 @@ MERCHANTABILITY OR FIT FOR A PARTICULAR PURPOSE.
 See the Mulan PSL v2 for more details. */
 
 #pragma once
+
+#include <memory>
+#include <vector>
+#include "common/config.h"
 #include "execution_defs.h"
-#include "execution_manager.h"
 #include "executor_abstract.h"
-#include "index/ix.h"
-#include "system/sm.h"
 
 class NestedLoopJoinExecutor : public AbstractExecutor {
    private:
     std::unique_ptr<AbstractExecutor> left_;
     std::unique_ptr<AbstractExecutor> right_;
     size_t len_;
+    size_t left_tuple_len_;
+    size_t join_buffer_capacity_;
     std::vector<ColMeta> cols_;
     std::vector<Condition> fed_conds_;
-    std::unique_ptr<RmRecord> left_rec_;
+
+    std::vector<std::unique_ptr<RmRecord>> left_block_;
+    size_t block_idx_;
     std::unique_ptr<RmRecord> record_;
     bool is_end_;
 
     std::unique_ptr<RmRecord> join_records(RmRecord *lrec, RmRecord *rrec) {
         auto rec = std::make_unique<RmRecord>(len_);
-        memcpy(rec->data, lrec->data, left_->tupleLen());
-        memcpy(rec->data + left_->tupleLen(), rrec->data, right_->tupleLen());
+        memcpy(rec->data, lrec->data, left_tuple_len_);
+        memcpy(rec->data + left_tuple_len_, rrec->data, right_->tupleLen());
         return rec;
     }
 
-    bool try_current() {
-        if (right_->is_end()) {
+    void load_left_block() {
+        left_block_.clear();
+        size_t used = 0;
+        while (!left_->is_end()) {
+            if (!left_block_.empty() && used + left_tuple_len_ > join_buffer_capacity_) {
+                break;
+            }
+            left_block_.push_back(left_->Next());
+            used += left_tuple_len_;
+            left_->nextTuple();
+        }
+    }
+
+    bool try_match() {
+        if (block_idx_ >= left_block_.size() || right_->is_end()) {
             return false;
         }
         auto right_rec = right_->Next();
-        auto joined = join_records(left_rec_.get(), right_rec.get());
+        auto joined = join_records(left_block_[block_idx_].get(), right_rec.get());
         if (fed_conds_.empty() || eval_conds(fed_conds_, joined.get(), cols_)) {
             record_ = std::move(joined);
             is_end_ = false;
             return true;
         }
+        right_->nextTuple();
         return false;
     }
 
     void find_next() {
         is_end_ = true;
         record_.reset();
-        while (!left_->is_end()) {
-            while (!right_->is_end()) {
-                if (try_current()) {
+
+        while (true) {
+            if (left_block_.empty()) {
+                load_left_block();
+                if (left_block_.empty()) {
                     return;
                 }
-                right_->nextTuple();
+                block_idx_ = 0;
+                right_->beginTuple();
             }
-            left_->nextTuple();
-            if (left_->is_end()) {
-                return;
+
+            while (block_idx_ < left_block_.size()) {
+                while (!right_->is_end()) {
+                    if (try_match()) {
+                        return;
+                    }
+                }
+                block_idx_++;
+                right_->beginTuple();
             }
-            left_rec_ = left_->Next();
-            right_->beginTuple();
+
+            left_block_.clear();
+            block_idx_ = 0;
         }
     }
 
@@ -71,14 +100,17 @@ class NestedLoopJoinExecutor : public AbstractExecutor {
                            std::vector<Condition> conds) {
         left_ = std::move(left);
         right_ = std::move(right);
-        len_ = left_->tupleLen() + right_->tupleLen();
+        left_tuple_len_ = left_->tupleLen();
+        len_ = left_tuple_len_ + right_->tupleLen();
+        join_buffer_capacity_ = JOIN_BUFFER_SIZE;
         cols_ = left_->cols();
         auto right_cols = right_->cols();
         for (auto &col : right_cols) {
-            col.offset += left_->tupleLen();
+            col.offset += left_tuple_len_;
         }
         cols_.insert(cols_.end(), right_cols.begin(), right_cols.end());
         fed_conds_ = std::move(conds);
+        block_idx_ = 0;
         is_end_ = true;
     }
 
@@ -90,12 +122,8 @@ class NestedLoopJoinExecutor : public AbstractExecutor {
 
     void beginTuple() override {
         left_->beginTuple();
-        if (left_->is_end()) {
-            is_end_ = true;
-            return;
-        }
-        left_rec_ = left_->Next();
-        right_->beginTuple();
+        left_block_.clear();
+        block_idx_ = 0;
         find_next();
     }
 

@@ -299,6 +299,9 @@ int main(int argc, char **argv) {
         recovery->analyze();
         recovery->redo();
         recovery->undo();
+        log_manager->set_next_lsn(recovery->get_next_lsn());
+        txn_manager->set_next_txn_id(recovery->get_next_txn_id());
+        buffer_pool_manager->flush_all_dirty_pages();
         
         // 开启服务端，开始接受客户端连接
         start_server();

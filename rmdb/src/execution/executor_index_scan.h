@@ -44,6 +44,9 @@ class IndexScanExecutor : public AbstractExecutor {
         } else if (col.type == TYPE_FLOAT) {
             float v = -std::numeric_limits<float>::max();
             memcpy(buf, &v, sizeof(float));
+        } else if (col.type == TYPE_BIGINT || col.type == TYPE_DATETIME) {
+            int64_t v = std::numeric_limits<int64_t>::min();
+            memcpy(buf, &v, sizeof(int64_t));
         } else {
             memset(buf, 0, col.len);
         }
@@ -56,6 +59,9 @@ class IndexScanExecutor : public AbstractExecutor {
         } else if (col.type == TYPE_FLOAT) {
             float v = std::numeric_limits<float>::max();
             memcpy(buf, &v, sizeof(float));
+        } else if (col.type == TYPE_BIGINT || col.type == TYPE_DATETIME) {
+            int64_t v = std::numeric_limits<int64_t>::max();
+            memcpy(buf, &v, sizeof(int64_t));
         } else {
             memset(buf, 0xff, col.len);
         }
@@ -92,6 +98,9 @@ class IndexScanExecutor : public AbstractExecutor {
     }
 
     void beginTuple() override {
+        if (context_ != nullptr && context_->txn_ != nullptr && context_->lock_mgr_ != nullptr) {
+            context_->lock_mgr_->lock_shared_on_table(context_->txn_, fh_->GetFd());
+        }
         auto ih = sm_manager_->ihs_.at(sm_manager_->get_ix_manager()->get_index_name(tab_name_, index_meta_.cols)).get();
         std::vector<char> lower(index_meta_.col_tot_len);
         std::vector<char> upper(index_meta_.col_tot_len);

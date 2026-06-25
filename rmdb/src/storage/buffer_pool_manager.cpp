@@ -227,3 +227,37 @@ void BufferPoolManager::flush_all_pages(int fd) {
         }
     }
 }
+
+void BufferPoolManager::flush_all_dirty_pages() {
+    std::scoped_lock lock{latch_};
+    for (auto &entry : page_table_) {
+        PageId page_id = entry.first;
+        frame_id_t frame_id = entry.second;
+        Page *page = &pages_[frame_id];
+        if (page->is_dirty_) {
+            disk_manager_->write_page(page_id.fd, page_id.page_no, page->get_data(), PAGE_SIZE);
+            page->is_dirty_ = false;
+        }
+    }
+}
+
+void BufferPoolManager::remove_all_pages(int fd) {
+    std::scoped_lock lock{latch_};
+    std::vector<PageId> to_remove;
+    for (auto &entry : page_table_) {
+        if (entry.first.fd == fd) {
+            to_remove.push_back(entry.first);
+        }
+    }
+    for (auto &page_id : to_remove) {
+        frame_id_t frame_id = page_table_[page_id];
+        Page *page = &pages_[frame_id];
+        page_table_.erase(page_id);
+        replacer_->pin(frame_id);
+        page->reset_memory();
+        page->id_ = {INVALID_PAGE_ID, INVALID_PAGE_ID};
+        page->pin_count_ = 0;
+        page->is_dirty_ = false;
+        free_list_.push_back(frame_id);
+    }
+}

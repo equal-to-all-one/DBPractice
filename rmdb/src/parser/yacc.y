@@ -23,7 +23,7 @@ using namespace ast;
 // keywords
 %token SHOW TABLES CREATE TABLE DROP DESC INSERT INTO VALUES DELETE FROM ASC ORDER BY
 WHERE UPDATE SET SELECT INT BIGINT CHAR FLOAT DATETIME INDEX AND JOIN EXIT HELP TXN_BEGIN TXN_COMMIT TXN_ABORT TXN_ROLLBACK ORDER_BY
-COUNT SUM MAX MIN AS
+COUNT SUM MAX MIN AS LIMIT
 // non-keywords
 %token LEQ NEQ GEQ T_EOF
 
@@ -44,13 +44,15 @@ COUNT SUM MAX MIN AS
 %type <sv_strs> tableList colNameList
 %type <sv_col> col
 %type <sv_cols> colList
+%type <sv_orderby> order_item
+%type <sv_orderby_list> order_clause opt_order_clause
 %type <sv_select_item> selectorItem
 %type <sv_select_items> selector selectorList
 %type <sv_set_clause> setClause
 %type <sv_set_clauses> setClauses
 %type <sv_cond> condition
 %type <sv_conds> whereClause optWhereClause
-%type <sv_orderby>  order_clause opt_order_clause
+%type <sv_int> opt_limit_clause
 %type <sv_orderby_dir> opt_asc_desc
 
 %%
@@ -150,9 +152,9 @@ dml:
     {
         $$ = std::make_shared<UpdateStmt>($2, $4, $5);
     }
-    |   SELECT selector FROM tableList optWhereClause opt_order_clause
+    |   SELECT selector FROM tableList optWhereClause opt_order_clause opt_limit_clause
     {
-        $$ = std::make_shared<SelectStmt>($2, $4, $5, $6);
+        $$ = std::make_shared<SelectStmt>($2, $4, $5, $6, $7);
     }
     ;
 
@@ -416,19 +418,44 @@ tableList:
     ;
 
 opt_order_clause:
-    ORDER BY order_clause      
-    { 
-        $$ = $3; 
+    ORDER BY order_clause
+    {
+        $$ = $3;
     }
-    |   /* epsilon */ { /* ignore*/ }
+    |   /* epsilon */
+    {
+        $$ = std::vector<std::shared_ptr<OrderBy>>{};
+    }
     ;
 
 order_clause:
-      col  opt_asc_desc 
-    { 
+        order_item
+    {
+        $$ = std::vector<std::shared_ptr<OrderBy>>{$1};
+    }
+    |   order_clause ',' order_item
+    {
+        $$.push_back($3);
+    }
+    ;
+
+order_item:
+        col opt_asc_desc
+    {
         $$ = std::make_shared<OrderBy>($1, $2);
     }
-    ;   
+    ;
+
+opt_limit_clause:
+        /* epsilon */
+    {
+        $$ = -1;
+    }
+    |   LIMIT VALUE_INT
+    {
+        $$ = std::stoi($2);
+    }
+    ;
 
 opt_asc_desc:
     ASC          { $$ = OrderBy_ASC;     }

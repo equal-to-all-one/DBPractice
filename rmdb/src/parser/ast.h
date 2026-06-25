@@ -236,20 +236,16 @@ struct SelectStmt : public TreeNode {
     std::vector<std::string> tabs;
     std::vector<std::shared_ptr<BinaryExpr>> conds;
     std::vector<std::shared_ptr<JoinExpr>> jointree;
-
-    
-    bool has_sort;
-    std::shared_ptr<OrderBy> order;
-
+    std::vector<std::shared_ptr<OrderBy>> orders;
+    int limit = -1;
 
     SelectStmt(std::vector<std::shared_ptr<SelectItem>> select_items_,
                std::vector<std::string> tabs_,
                std::vector<std::shared_ptr<BinaryExpr>> conds_,
-               std::shared_ptr<OrderBy> order_) :
+               std::vector<std::shared_ptr<OrderBy>> orders_,
+               int limit_) :
             select_items(std::move(select_items_)), tabs(std::move(tabs_)), conds(std::move(conds_)),
-            order(std::move(order_)) {
-                has_sort = (bool)order;
-            }
+            orders(std::move(orders_)), limit(limit_) {}
 };
 
 // Semantic value
@@ -287,6 +283,7 @@ struct SemValue {
     std::vector<std::shared_ptr<BinaryExpr>> sv_conds;
 
     std::shared_ptr<OrderBy> sv_orderby;
+    std::vector<std::shared_ptr<OrderBy>> sv_orderby_list;
 };
 
 extern std::shared_ptr<ast::TreeNode> parse_tree;

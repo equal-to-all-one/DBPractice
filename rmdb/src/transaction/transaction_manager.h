@@ -44,6 +44,8 @@ public:
 
     LockManager* get_lock_manager() { return lock_manager_; }
 
+    void set_next_txn_id(txn_id_t txn_id) { next_txn_id_ = txn_id; }
+
     /**
      * @description: 获取事务ID为txn_id的事务对象
      * @return {Transaction*} 事务对象的指针
