@@ -84,34 +84,81 @@ bool LockManager::lock_on_table(Transaction *txn, int tab_fd, LockMode lock_mode
     LockDataId lock_data_id(tab_fd, LockDataType::TABLE);
     auto &queue = lock_table_[lock_data_id];
 
-    for (auto &req : queue.request_queue_) {
-        if (req.txn_id_ == txn->get_transaction_id() && req.granted_) {
-            if (lock_mode == LockMode::EXLUCSIVE) {
-                for (auto &other : queue.request_queue_) {
-                    if (other.granted_ && other.txn_id_ != txn->get_transaction_id()) {
-                        throw TransactionAbortException(txn->get_transaction_id(), AbortReason::DEADLOCK_PREVENTION);
-                    }
-                }
-                req.lock_mode_ = LockMode::EXLUCSIVE;
-                queue.group_lock_mode_ = GroupLockMode::X;
+    auto covers = [](LockMode held, LockMode request) {
+        if (held == request || held == LockMode::EXLUCSIVE) {
+            return true;
+        }
+        if (held == LockMode::S_IX) {
+            return request == LockMode::SHARED || request == LockMode::INTENTION_SHARED ||
+                   request == LockMode::INTENTION_EXCLUSIVE;
+        }
+        if (held == LockMode::SHARED) {
+            return request == LockMode::INTENTION_SHARED;
+        }
+        if (held == LockMode::INTENTION_EXCLUSIVE) {
+            return request == LockMode::INTENTION_SHARED;
+        }
+        return false;
+    };
+
+    auto combine = [](LockMode held, LockMode request) {
+        if (held == LockMode::EXLUCSIVE || request == LockMode::EXLUCSIVE) {
+            return LockMode::EXLUCSIVE;
+        }
+        if (held == LockMode::S_IX || request == LockMode::S_IX) {
+            return LockMode::S_IX;
+        }
+        if ((held == LockMode::SHARED && request == LockMode::INTENTION_EXCLUSIVE) ||
+            (held == LockMode::INTENTION_EXCLUSIVE && request == LockMode::SHARED)) {
+            return LockMode::S_IX;
+        }
+        if (held == LockMode::SHARED || request == LockMode::SHARED) {
+            return LockMode::SHARED;
+        }
+        if (held == LockMode::INTENTION_EXCLUSIVE || request == LockMode::INTENTION_EXCLUSIVE) {
+            return LockMode::INTENTION_EXCLUSIVE;
+        }
+        return LockMode::INTENTION_SHARED;
+    };
+
+    auto single_group = [](LockMode mode) {
+        switch (mode) {
+            case LockMode::SHARED:
+                return GroupLockMode::S;
+            case LockMode::EXLUCSIVE:
+                return GroupLockMode::X;
+            case LockMode::INTENTION_SHARED:
+                return GroupLockMode::IS;
+            case LockMode::INTENTION_EXCLUSIVE:
+                return GroupLockMode::IX;
+            case LockMode::S_IX:
+                return GroupLockMode::SIX;
+        }
+        return GroupLockMode::NON_LOCK;
+    };
+
+    auto own_req = queue.request_queue_.end();
+    for (auto it = queue.request_queue_.begin(); it != queue.request_queue_.end(); ++it) {
+        if (it->txn_id_ == txn->get_transaction_id()) {
+            own_req = it;
+            if (it->granted_ && covers(it->lock_mode_, lock_mode)) {
                 txn->get_lock_set()->insert(lock_data_id);
                 return true;
             }
-            if (req.lock_mode_ == lock_mode ||
-                (lock_mode == LockMode::INTENTION_EXCLUSIVE &&
-                 (req.lock_mode_ == LockMode::INTENTION_EXCLUSIVE || req.lock_mode_ == LockMode::EXLUCSIVE))) {
-                txn->get_lock_set()->insert(lock_data_id);
-                return true;
-            }
+            break;
         }
     }
+
+    LockMode target_mode = own_req != queue.request_queue_.end() && own_req->granted_
+                               ? combine(own_req->lock_mode_, lock_mode)
+                               : lock_mode;
 
     for (auto &req : queue.request_queue_) {
         if (!req.granted_ && req.txn_id_ != txn->get_transaction_id()) {
             throw TransactionAbortException(txn->get_transaction_id(), AbortReason::DEADLOCK_PREVENTION);
         }
         if (req.granted_ && req.txn_id_ != txn->get_transaction_id() &&
-            table_conflict(lock_mode, queue.group_lock_mode_)) {
+            table_conflict(target_mode, single_group(req.lock_mode_))) {
             throw TransactionAbortException(txn->get_transaction_id(), AbortReason::DEADLOCK_PREVENTION);
         }
     }
@@ -119,14 +166,14 @@ bool LockManager::lock_on_table(Transaction *txn, int tab_fd, LockMode lock_mode
     bool found = false;
     for (auto &req : queue.request_queue_) {
         if (req.txn_id_ == txn->get_transaction_id()) {
-            req.lock_mode_ = lock_mode;
+            req.lock_mode_ = target_mode;
             req.granted_ = true;
             found = true;
             break;
         }
     }
     if (!found) {
-        queue.request_queue_.emplace_back(txn->get_transaction_id(), lock_mode);
+        queue.request_queue_.emplace_back(txn->get_transaction_id(), target_mode);
         queue.request_queue_.back().granted_ = true;
     }
     update_group_lock_mode(queue);

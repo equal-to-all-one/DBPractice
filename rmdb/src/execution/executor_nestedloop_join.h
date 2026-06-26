@@ -28,6 +28,7 @@ class NestedLoopJoinExecutor : public AbstractExecutor {
 
     std::vector<std::unique_ptr<RmRecord>> left_block_;
     size_t block_idx_;
+    std::unique_ptr<RmRecord> right_record_;
     std::unique_ptr<RmRecord> record_;
     bool is_end_;
 
@@ -52,17 +53,16 @@ class NestedLoopJoinExecutor : public AbstractExecutor {
     }
 
     bool try_match() {
-        if (block_idx_ >= left_block_.size() || right_->is_end()) {
+        if (block_idx_ >= left_block_.size() || right_record_ == nullptr) {
             return false;
         }
-        auto right_rec = right_->Next();
-        auto joined = join_records(left_block_[block_idx_].get(), right_rec.get());
+        auto joined = join_records(left_block_[block_idx_].get(), right_record_.get());
+        block_idx_++;
         if (fed_conds_.empty() || eval_conds(fed_conds_, joined.get(), cols_)) {
             record_ = std::move(joined);
             is_end_ = false;
             return true;
         }
-        right_->nextTuple();
         return false;
     }
 
@@ -78,20 +78,26 @@ class NestedLoopJoinExecutor : public AbstractExecutor {
                 }
                 block_idx_ = 0;
                 right_->beginTuple();
+                right_record_.reset();
             }
 
-            while (block_idx_ < left_block_.size()) {
-                while (!right_->is_end()) {
+            while (!right_->is_end() || right_record_ != nullptr) {
+                if (right_record_ == nullptr) {
+                    right_record_ = right_->Next();
+                    block_idx_ = 0;
+                }
+                while (block_idx_ < left_block_.size()) {
                     if (try_match()) {
                         return;
                     }
                 }
-                block_idx_++;
-                right_->beginTuple();
+                right_->nextTuple();
+                right_record_.reset();
             }
 
             left_block_.clear();
             block_idx_ = 0;
+            right_record_.reset();
         }
     }
 
@@ -124,6 +130,7 @@ class NestedLoopJoinExecutor : public AbstractExecutor {
         left_->beginTuple();
         left_block_.clear();
         block_idx_ = 0;
+        right_record_.reset();
         find_next();
     }
 
@@ -131,7 +138,6 @@ class NestedLoopJoinExecutor : public AbstractExecutor {
         if (is_end_) {
             return;
         }
-        right_->nextTuple();
         find_next();
     }
 
